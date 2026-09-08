@@ -1,7 +1,21 @@
-"""診斷規則：核心是「LLM 提議、數值訊號否決」。"""
+"""診斷規則：核心是「LLM 提議、數值訊號否決」。
 
+絕對門檻只有在 THRESHOLDS_CALIBRATED=True 時才會用來否決 grader，
+所以驗證訊號否決的測試都要掛上 calibrated fixture；
+未校準（預設）模式另有一組測試，確認不會單憑絕對分數拒答。
+"""
+
+import pytest
+
+from agentic import config
 from agentic.diagnose import diagnose
 from agentic.schemas import Diagnosis, GradeResult, Signals
+
+
+@pytest.fixture
+def calibrated(monkeypatch):
+    """模擬「門檻已針對這個 reranker 校準過」的正式環境。"""
+    monkeypatch.setattr(config, "THRESHOLDS_CALIBRATED", True)
 
 
 def sig(**kw) -> Signals:
@@ -20,7 +34,7 @@ def test_empty_retrieval_is_out_of_scope():
     assert out.diagnosis == Diagnosis.OUT_OF_SCOPE
 
 
-def test_score_floor_vetoes_grader():
+def test_score_floor_vetoes_grader(calibrated):
     """分數低於地板時，grader 說足夠也不採信。"""
     out = diagnose(
         sig(top1=-5.0), grade(Diagnosis.SUFFICIENT), retried_variants=True, decomposed=True
@@ -28,13 +42,13 @@ def test_score_floor_vetoes_grader():
     assert out.diagnosis == Diagnosis.OUT_OF_SCOPE
 
 
-def test_sufficient_with_good_score():
+def test_sufficient_with_good_score(calibrated):
     out = diagnose(sig(), grade(Diagnosis.SUFFICIENT), retried_variants=False, decomposed=False)
     assert out.diagnosis == Diagnosis.SUFFICIENT
     assert not out.low_confidence
 
 
-def test_sufficient_but_low_score_retries_first():
+def test_sufficient_but_low_score_retries_first(calibrated):
     """grader 說足夠但分數未達門檻：先去找更強的證據，不要直接答。"""
     out = diagnose(
         sig(top1=0.5), grade(Diagnosis.SUFFICIENT), retried_variants=False, decomposed=False
@@ -42,7 +56,7 @@ def test_sufficient_but_low_score_retries_first():
     assert out.diagnosis == Diagnosis.LEXICAL_MISMATCH
 
 
-def test_sufficient_low_score_accepted_after_retry_as_low_confidence():
+def test_sufficient_low_score_accepted_after_retry_as_low_confidence(calibrated):
     out = diagnose(
         sig(top1=0.5), grade(Diagnosis.SUFFICIENT), retried_variants=True, decomposed=False
     )
@@ -113,7 +127,7 @@ def test_lexical_mismatch_after_retry_without_competition_refuses():
     assert out.diagnosis == Diagnosis.OUT_OF_SCOPE
 
 
-def test_out_of_scope_gets_one_rewrite_chance_when_score_not_low():
+def test_out_of_scope_gets_one_rewrite_chance_when_score_not_low(calibrated):
     out = diagnose(
         sig(top1=0.8), grade(Diagnosis.OUT_OF_SCOPE), retried_variants=False, decomposed=False
     )
@@ -148,3 +162,36 @@ def test_grader_failure_falls_back_to_signals_and_flags_low_confidence():
         retried_variants=True, decomposed=False,
     )
     assert weak.diagnosis == Diagnosis.OUT_OF_SCOPE
+
+
+# ==================== 未校準模式（預設）====================
+def test_uncalibrated_mode_does_not_refuse_on_absolute_score_alone():
+    """門檻沒校準過時，不可單憑「分數很低」就拒答——那個門檻只是猜測。"""
+    out = diagnose(
+        sig(top1=-8.0), grade(Diagnosis.SUFFICIENT), retried_variants=False, decomposed=False
+    )
+    assert out.diagnosis == Diagnosis.SUFFICIENT
+    assert out.low_confidence  # 採信 grader，但標記低信心
+
+
+def test_uncalibrated_mode_still_refuses_when_grader_says_not_in_corpus():
+    """把關改由 grader 負責：它說語料庫沒有，重試過後仍然拒答。"""
+    out = diagnose(
+        sig(top1=-8.0), grade(Diagnosis.OUT_OF_SCOPE), retried_variants=True, decomposed=False
+    )
+    assert out.diagnosis == Diagnosis.OUT_OF_SCOPE
+
+
+def test_uncalibrated_mode_retries_before_refusing():
+    out = diagnose(
+        sig(top1=-8.0), grade(Diagnosis.OUT_OF_SCOPE), retried_variants=False, decomposed=False
+    )
+    assert out.diagnosis == Diagnosis.LEXICAL_MISMATCH
+
+
+def test_empty_retrieval_still_refuses_when_uncalibrated():
+    """檢索完全沒東西與分數尺度無關，仍然該拒答。"""
+    out = diagnose(
+        Signals(), grade(Diagnosis.SUFFICIENT), retried_variants=False, decomposed=False
+    )
+    assert out.diagnosis == Diagnosis.OUT_OF_SCOPE

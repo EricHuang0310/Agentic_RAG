@@ -50,6 +50,14 @@ class QueryAnalysis(BaseModel):
             result.append((name, text))
         return result
 
+    def has_new_variants(self, original: str) -> bool:
+        """除了原問句以外，是否真的產出了新的表述。
+
+        小模型的 JSON 有時整段解析失敗，此時 variants() 只會剩下原問句，
+        拿它再檢索一次必然拿到同一批結果，白白浪費一輪預算與延遲。
+        """
+        return len(self.variants(original)) > 1
+
 
 _STANDALONE_SYSTEM = (
     "你是一個查詢重構器。使用者正在與內部作業流程助手對話，助手上一輪反問了他一個問題。\n"

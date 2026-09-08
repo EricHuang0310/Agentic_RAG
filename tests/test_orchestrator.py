@@ -425,3 +425,47 @@ def test_renamed_dimension_does_not_cause_a_repeat_question():
 
     assert result.decision == Decision.ANSWER_ALL_BRANCHES
     assert state is None
+
+
+# ==================== analyzer 失效時不要空轉、也不要硬判拒答 ====================
+def test_no_new_variants_does_not_waste_a_retrieval_round():
+    """analyzer 的 JSON 解析失敗時，變體只剩原問句，重跑必然拿到同一批結果。"""
+    retriever = FakeRetriever(lambda q, i: COMPETING)
+    llm = FakeLLM({
+        "grade": {"verdict": "lexical_mismatch"},
+        "analyze": "小模型吐了一段不是 JSON 的話",
+        "branches": {
+            "dimension": "業務類別",
+            "branches": [
+                {"label": "久未往來帳戶", "key_terms": [], "chunks": ["C1"]},
+                {"label": "新開戶", "key_terms": [], "chunks": ["C2"]},
+            ],
+        },
+        "branch_answer": "若屬久未往來帳戶：…[文獻 1]",
+    })
+    result, _, tracer = run_agent(retriever, llm)
+
+    assert len(retriever.queries) == 1  # 沒有白跑第二次檢索
+    assert any(s.step == "skip_retry" for s in tracer.steps)
+    # 也不能因為 analyzer 壞了就判拒答——證據還在，交給後續規則決定
+    assert result.decision != Decision.REFUSE
+
+
+def test_analyzer_failure_with_competing_evidence_goes_to_branch_handling():
+    retriever = FakeRetriever(lambda q, i: COMPETING)
+    llm = FakeLLM({
+        "grade": {"verdict": "lexical_mismatch"},
+        "analyze": None,  # 呼叫失敗
+        "branches": {
+            "dimension": "業務類別",
+            "branches": [
+                {"label": "久未往來帳戶", "key_terms": [], "chunks": ["C1"]},
+                {"label": "新開戶", "key_terms": [], "chunks": ["C2"]},
+            ],
+        },
+        "branch_answer": "若屬久未往來帳戶：…[文獻 1]\n若屬新開戶：…[文獻 2]",
+    })
+    result, _, _ = run_agent(retriever, llm)
+
+    assert result.decision == Decision.ANSWER_ALL_BRANCHES
+    assert result.diagnosis == Diagnosis.MULTI_BRANCH

@@ -49,6 +49,18 @@ TOP_N = _i("ARKKB_TOP_N", 6)
 TOP_K = _i("ARKKB_TOP_K", 66)
 
 # ==================== 分數閾值（需校準）====================
+# 這些絕對門檻是否已針對「目前這個 reranker + 目前這批語料」校準過。
+#
+# 預設 False，代表尚未校準。此時**不允許單憑絕對分數判定拒答**：
+#   - 停用 SCORE_FLOOR 的硬否決
+#   - grader 說證據足夠時直接採信，不再要求 top1 >= SCORE_ANSWERABLE
+# 因為未校準的絕對門檻只是猜測，猜錯的代價是把答得出來的問題判成拒答。
+# 未校準時的把關改由 LLM grader 負責（它至少讀得懂內容）。
+#
+# 跑過 scripts/probe_scores.py 確認分數尺度、把下面幾個門檻調成實際數值後，
+# 再設 ARKKB_THRESHOLDS_CALIBRATED=1 打開完整的訊號否決機制。
+THRESHOLDS_CALIBRATED = os.getenv("ARKKB_THRESHOLDS_CALIBRATED", "0") in ("1", "true", "True")
+
 # top1 >= SCORE_ANSWERABLE 且 grader 認為足夠 -> 直接回答
 SCORE_ANSWERABLE = _f("ARKKB_SCORE_ANSWERABLE", 1.0)
 # top1 < SCORE_FLOOR -> 語料庫幾乎確定沒有這個主題，反問也沒用

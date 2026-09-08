@@ -141,21 +141,56 @@ query 分析要等到第一輪判定不足才會做。最壞情況由預算上�
 ## 閾值需要校準
 
 `SCORE_ANSWERABLE` / `SCORE_SUPPORTIVE` / `SCORE_FLOOR` / `GAP_AMBIGUOUS`
-這些絕對門檻只對「同一個 reranker + 同一批語料」有意義。預設值沿用舊版的
-`RERANK_SCORE_THRESHOLD = 1`（`SCORE_ANSWERABLE = 1.0`），所以行為起點與舊版一致，
-但**換 reranker 或換知識庫後必須重新校準**。
+這些絕對門檻只對「同一個 reranker + 同一批語料」有意義。
+
+**預設是「未校準模式」**（`ARKKB_THRESHOLDS_CALIBRATED=0`）：此時不允許單憑
+絕對分數判定拒答——停用 `SCORE_FLOOR` 的硬否決，grader 說證據足夠時直接採信
+（標記 `low_confidence`）。因為未校準的門檻只是猜測，猜錯的代價是把答得出來的
+問題判成拒答。這個模式下把關由 LLM grader 負責，它至少讀得懂內容。
+
+校準完成後設定 `ARKKB_THRESHOLDS_CALIBRATED=1`，才會啟用「訊號否決 grader」
+的完整機制。
 
 建議流程：
 
 1. 收 50～100 題真實問題，標註「應回答 / 應反問 / 應拒答」
-2. 打開 `trace` 跑一遍，記下每題的 `signals`
-3. 看三類問題的 `top1` 與 `gap` 分布，挑切點
-4. 量兩個對立指標：
+2. 跑 `python scripts/probe_scores.py --file questions.txt`（每行 `問題<TAB>標註`）
+3. 看三類問題的 `top1` 與 `gap` 分布，依它建議的切點微調
+4. 設定 `ARKKB_THRESHOLDS_CALIBRATED=1`
+5. 量兩個對立指標：
    - **over-clarification rate**：本來能直接答卻反問了
    - **silent misinterpretation rate**：該反問卻自己挑一個情境答了
 
 只看前者會讓人把反問拿掉，然後在後者上悄悄爆掉——而後者才是真的會造成
 作業錯誤的那個。
+
+## 排查：第一輪就直接拒答
+
+回應的 `trace` 裡有一步 `diagnose`，它的 `reason` 會直接寫出是哪一條規則
+判定拒答的，對照下表處理：
+
+| `reason` | 意思 | 怎麼處理 |
+|---|---|---|
+| `檢索結果為空` | 知識庫回了 200 但 `data` 是空陣列 | 檢查 `kb_list` 名稱、`top_k`；用 `scripts/probe_scores.py` 直接打同一個 query 確認 |
+| `top1=… 低於地板 …` | 絕對門檻否決 | **門檻沒校準**，見下方 |
+| `grader 判定語料庫未涵蓋此主題` | LLM grader 說沒有 | 看 `grade` 那一步的 `reasoning`；若判斷有誤是 grader prompt 的問題 |
+| `grader 失效；分數不足以支撐作答` | grader 輸出無法解析，退回純訊號 | 看 `grade` 的 `parse_ok`；門檻沒校準時分數判斷不可信 |
+
+另外看 `signals` 那一步的 `top1`：**如果它是負數或遠小於 1，就代表預設門檻
+和你的 reranker 尺度對不上**。拒答時 `reference_chunks` 仍會回傳，裡面的
+`score` 也可以直接看出尺度。
+
+先跑一次探測：
+
+```bash
+python scripts/probe_scores.py "遺留物現金怎麼處理？" "銷戶要怎麼辦理？"
+```
+
+它會印出真實的 top1／top2／gap 分布。有標註資料（每行 `問題<TAB>answer|clarify|refuse`）
+時還會建議切點。把 `agentic/config.py` 的門檻改成實際數值後，設定
+`ARKKB_THRESHOLDS_CALIBRATED=1` 才會啟用完整的訊號否決。
+
+`GET /healthz` 的 `thresholds.calibrated` 可以確認目前是哪個模式。
 
 ## 排查：被問了一模一樣的問題
 

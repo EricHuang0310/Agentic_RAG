@@ -53,8 +53,9 @@ def diagnose(
     if signals.n_chunks == 0:
         return DiagnosisOutcome(Diagnosis.OUT_OF_SCOPE, "檢索結果為空")
 
-    # 2. 硬地板否決：分數低到這種程度時，grader 說什麼都不採信
-    if signals.top1 < config.SCORE_FLOOR:
+    # 2. 硬地板否決：分數低到這種程度時，grader 說什麼都不採信。
+    #    僅在門檻已校準時啟用——未校準的地板會把答得出來的問題誤判成拒答。
+    if config.THRESHOLDS_CALIBRATED and signals.top1 < config.SCORE_FLOOR:
         return DiagnosisOutcome(
             Diagnosis.OUT_OF_SCOPE,
             f"top1={signals.top1} 低於地板 {config.SCORE_FLOOR}，語料庫應無此主題",
@@ -62,6 +63,13 @@ def diagnose(
 
     # 3. grader 說足夠
     if grade.verdict == Diagnosis.SUFFICIENT:
+        if not config.THRESHOLDS_CALIBRATED:
+            # 門檻未校準，絕對分數不具參考價值，直接採信 grader 但標記低信心
+            return DiagnosisOutcome(
+                Diagnosis.SUFFICIENT,
+                "grader 判定足夠；門檻尚未校準，不以絕對分數否決",
+                low_confidence=True,
+            )
         if signals.top1 >= config.SCORE_ANSWERABLE:
             return DiagnosisOutcome(Diagnosis.SUFFICIENT, "grader 判定足夠且分數達門檻")
         if not retried_variants:
@@ -111,7 +119,9 @@ def diagnose(
 
     # 7. grader 說語料庫沒有
     if grade.verdict == Diagnosis.OUT_OF_SCOPE:
-        if not retried_variants and signals.top1 >= config.SCORE_SUPPORTIVE:
+        if not retried_variants and (
+            not config.THRESHOLDS_CALIBRATED or signals.top1 >= config.SCORE_SUPPORTIVE
+        ):
             return DiagnosisOutcome(
                 Diagnosis.LEXICAL_MISMATCH,
                 f"grader 說無資料但 top1={signals.top1} 不算低，值得改寫一次再確認",

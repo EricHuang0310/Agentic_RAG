@@ -51,13 +51,20 @@ async def lifespan(app: FastAPI):
         app.state.agent = Agent(RetrieveClient(client), LLMClient(client))
         app.state.sessions = InMemorySessionStore()
         logger.info(
-            "服務啟動：kb=%s llm=%s 閾值(answerable=%s floor=%s supportive=%s)",
+            "服務啟動：kb=%s llm=%s 閾值(answerable=%s floor=%s supportive=%s) calibrated=%s",
             config.TARGET_KB_LIST,
             config.LLM_MODEL,
             config.SCORE_ANSWERABLE,
             config.SCORE_FLOOR,
             config.SCORE_SUPPORTIVE,
+            config.THRESHOLDS_CALIBRATED,
         )
+        if not config.THRESHOLDS_CALIBRATED:
+            logger.warning(
+                "分數門檻尚未校準（ARKKB_THRESHOLDS_CALIBRATED=0）："
+                "不會單憑絕對分數判定拒答，把關全部交給 LLM grader。"
+                "請先跑 scripts/probe_scores.py 確認分數尺度後再打開。"
+            )
         yield
 
 
@@ -143,6 +150,7 @@ async def healthz() -> dict:
         "kb_list": config.TARGET_KB_LIST,
         "active_sessions": await app.state.sessions.size(),
         "thresholds": {
+            "calibrated": config.THRESHOLDS_CALIBRATED,
             "answerable": config.SCORE_ANSWERABLE,
             "supportive": config.SCORE_SUPPORTIVE,
             "floor": config.SCORE_FLOOR,

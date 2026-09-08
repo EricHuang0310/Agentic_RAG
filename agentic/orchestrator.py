@@ -184,15 +184,30 @@ class Agent:
                 continue
 
             if outcome.diagnosis == Diagnosis.LEXICAL_MISMATCH and not retried_variants:
-                if analysis is None or not analysis.variants(query):
-                    # 沒有可用的變體就別空轉一輪
-                    outcome = DiagnosisOutcome(
-                        Diagnosis.OUT_OF_SCOPE, "無可用的 query 變體，停止重試"
-                    )
-                    break
-                plan = RetrievalPlan.VARIANTS
+                if analysis is not None and analysis.has_new_variants(query):
+                    plan = RetrievalPlan.VARIANTS
+                    retried_variants = True
+                    continue
+
+                # 沒有新的變體可試（多半是 analyzer 的 JSON 解析失敗）。
+                # 拿同一個 query 再檢索一次只會拿到同一批結果，所以不重試，
+                # 但也不能因此就判拒答——改為就地以「已重試」重新診斷，
+                # 讓後續規則決定這到底是多分支還是真的沒有。
+                tracer.add(
+                    "skip_retry",
+                    reason="analyzer 未產出新的 query 變體",
+                    analysis_parse_ok=analysis.parse_ok if analysis else None,
+                )
                 retried_variants = True
-                continue
+                outcome = diagnose(
+                    signals,
+                    grade,
+                    retried_variants=True,
+                    decomposed=decomposed,
+                    is_compound=analysis.is_compound if analysis else None,
+                )
+                tracer.add("diagnose", **outcome.as_detail())
+                break
 
             # MULTI_BRANCH / OUT_OF_SCOPE，或已經重試過：跳出迴圈收斂
             break
