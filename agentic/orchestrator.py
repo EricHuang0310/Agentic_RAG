@@ -28,7 +28,7 @@ from .generate import (
     generate_branch_answer,
 )
 from .grading import extract_branches, grade_chunks
-from .policy import BranchAction, choose_branch_action
+from .policy import BranchAction, choose_branch_action, resolve_branch_from_message
 from .query_ops import QueryAnalysis, analyze_query, rewrite_followup_to_standalone
 from .schemas import (
     Branch,
@@ -201,7 +201,9 @@ class Agent:
         if outcome.diagnosis in (Diagnosis.LEXICAL_MISMATCH, Diagnosis.COMPOUND, Diagnosis.UNKNOWN):
             budget.exhausted = True
             tracer.add("budget_exhausted", **budget.snapshot(), diagnosis=outcome.diagnosis.value)
-            return await self._fallback(query, chunks, signals, budget, session, tracer, round_label)
+            return await self._fallback(
+                message, query, chunks, signals, budget, session, tracer, round_label
+            )
 
         # ---------- 依終局診斷產出結果 ----------
         if outcome.diagnosis == Diagnosis.SUFFICIENT:
@@ -209,7 +211,7 @@ class Agent:
 
         if outcome.diagnosis == Diagnosis.MULTI_BRANCH:
             return await self._handle_multi_branch(
-                query, chunks, signals, budget, session, tracer, round_label
+                message, query, chunks, signals, budget, session, tracer, round_label
             )
 
         return self._refuse(query, chunks, signals, budget, round_label, outcome.reason), None
@@ -336,6 +338,7 @@ class Agent:
 
     async def _handle_multi_branch(
         self,
+        message: str,
         query: str,
         chunks: Sequence[Chunk],
         signals: Signals,
@@ -355,11 +358,33 @@ class Agent:
             # 判定為多分支卻抽不出分支：不硬答，改用通用反問把決定權交回使用者
             return self._generic_clarify(query, chunks, signals, budget, session, round_label)
 
+        # 不依賴 session 的防護：使用者這句話若已經指定了其中一個分支，
+        # 就直接回答那個分支。session 遺失（前端沒帶 session_id、TTL 過期、
+        # 服務重啟）時，這是唯一還擋得住「問一模一樣問題」的機制。
+        resolved = resolve_branch_from_message(message, branches)
+        if resolved is not None:
+            tracer.add(
+                "branch_resolved_from_message",
+                branch=resolved.label,
+                had_session=session is not None,
+            )
+            scoped = [c for c in chunks if c.chunk_id in set(resolved.chunk_ids)] or list(chunks)
+            return await self._answer(
+                query,
+                scoped,
+                signals,
+                budget,
+                tracer,
+                f"{round_label}（訊息已指定情境「{resolved.label}」）",
+                DiagnosisOutcome(Diagnosis.SUFFICIENT, f"使用者訊息已指定分支：{resolved.label}"),
+            )
+
         action = choose_branch_action(
             branches,
             chunks,
             dimension,
             asked_dimensions=set(session.asked_dimensions) if session else set(),
+            asked_branch_labels=session.asked_branch_labels if session else None,
             clarification_count=session.clarification_count if session else 0,
         )
         tracer.add("branch_policy", **action.as_detail())
@@ -439,11 +464,15 @@ class Agent:
             original_query=query,
             clarification_question=action.clarification_question,
             asked_dimensions=list(session.asked_dimensions) if session else [],
+            asked_branch_labels=list(session.asked_branch_labels) if session else [],
             clarification_count=(session.clarification_count if session else 0) + 1,
             status="awaiting_clarification",
         )
         if action.dimension and action.dimension not in new_state.asked_dimensions:
             new_state.asked_dimensions.append(action.dimension)
+        for label in action.branch_labels:
+            if label not in new_state.asked_branch_labels:
+                new_state.asked_branch_labels.append(label)
 
         return (
             AgentResult(
@@ -527,6 +556,7 @@ class Agent:
 
     async def _fallback(
         self,
+        message: str,
         query: str,
         chunks: Sequence[Chunk],
         signals: Signals,
@@ -543,7 +573,7 @@ class Agent:
         if has_branch_evidence(signals):
             if budget.can_afford_llm() and chunks:
                 return await self._handle_multi_branch(
-                    query, chunks, signals, budget, session, tracer, round_label
+                    message, query, chunks, signals, budget, session, tracer, round_label
                 )
             return self._generic_clarify(query, chunks, signals, budget, session, round_label)
 

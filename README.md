@@ -157,6 +157,27 @@ query 分析要等到第一輪判定不足才會做。最壞情況由預算上�
 只看前者會讓人把反問拿掉，然後在後者上悄悄爆掉——而後者才是真的會造成
 作業錯誤的那個。
 
+## 排查：被問了一模一樣的問題
+
+反問防護有三層，前兩層依賴 session 狀態、第三層不依賴：
+
+1. `clarification_count >= MAX_CLARIFICATIONS` → 改為分情境全列
+2. 同一個維度或同一組分支標籤問過 → 改為分情境全列
+3. **訊息內容本身已指定分支** → 直接回答該分支（不需要 session）
+
+若還是被重複問，先看回應 `trace` 裡的 `session_lookup` 那一步：
+
+- `session_found: false` 而 `session_id_provided: true` → session 遺失。
+  常見原因是 TTL（預設 30 分鐘）過期、`reload=True` 期間服務重啟、
+  或 uvicorn 多 worker 各持一份記憶體狀態。
+- `session_id_provided: false` → 前端第二輪沒有把第一輪的 `session_id` 帶回來。
+
+再看 `router_round`：第二輪應該是「反問後補充輪」，若顯示「首輪提問」
+就代表這一輪被當成全新問題處理了。
+
+第 3 層防護要求**恰好一個**分支匹配才生效。像「變更負責人」同時命中
+「獨資戶變更負責人」與「公司變更負責人」時仍屬模糊，會繼續反問——這是刻意的。
+
 ## 目前的限制
 
 - **沒有 lexical 通道。** 知識庫 API 只吃單一 query 字串，沒有 BM25 或 hybrid

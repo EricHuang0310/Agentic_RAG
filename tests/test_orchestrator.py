@@ -342,3 +342,86 @@ def test_invalid_citation_is_flagged_in_answer_and_trace():
     assert "系統提醒" in result.answer
     generate_step = next(s for s in tracer.steps if s.step == "generate_answer")
     assert generate_step.detail["invalid_citations"] == [7]
+
+
+# ==================== 重複反問的防護 ====================
+BRANCHES_5 = {
+    "dimension": "銷戶申請方式",
+    "branches": [
+        {"label": "獨資戶變更負責人", "key_terms": ["獨資戶"], "chunks": ["C1"]},
+        {"label": "公司變更負責人", "key_terms": ["公司"], "chunks": ["C2"]},
+        {"label": "一般銷戶申請", "key_terms": ["銷戶"], "chunks": ["C3"]},
+        {"label": "其他情形一", "key_terms": [], "chunks": ["C4"]},
+        {"label": "其他情形二", "key_terms": [], "chunks": ["C5"]},
+    ],
+}
+LONG_COMPETING = [
+    item(f"銷戶{i}.pdf", 1.3 - i * 0.01, "內容" * 400) for i in range(5)
+]
+
+
+def multi_branch_llm(**overrides):
+    responses = {
+        "grade": {"verdict": "multi_branch", "relevant_chunks": ["C1", "C2", "C3"]},
+        "analyze": {"is_compound": False, "rewritten_query": "", "keyword_query": "", "hyde_passage": ""},
+        "branches": BRANCHES_5,
+        "standalone": "獨資戶變更負責人的銷戶應如何辦理",
+        "answer": "一、應備文件…[文獻 1]",
+        "branch_answer": "若屬獨資戶變更負責人：…[文獻 1]",
+    }
+    responses.update(overrides)
+    return FakeLLM(responses)
+
+
+def test_picking_an_option_is_not_asked_again_even_when_session_is_lost():
+    """回報的問題：選了選項之後又被問一模一樣的問題。
+
+    最常見的成因是 session 遺失（前端沒帶回 session_id、TTL 過期、服務重啟），
+    此時 asked_dimensions 防護整個失效。改由訊息內容本身判斷情境已指定。
+    """
+    retriever = FakeRetriever(lambda q, i: LONG_COMPETING)
+    llm = multi_branch_llm()
+    result, state, tracer = run_agent(
+        retriever,
+        llm,
+        message="獨資戶變更負責人（獨資戶）",
+        session=None,  # session 遺失
+    )
+
+    assert result.decision == Decision.ANSWER
+    assert result.status == "completed"
+    assert result.clarification_options == []
+    assert state is None
+    assert any(s.step == "branch_resolved_from_message" for s in tracer.steps)
+
+
+def test_ambiguous_reply_still_triggers_clarification():
+    """訊息同時命中多個分支時不可自行挑一個，仍要問。"""
+    retriever = FakeRetriever(lambda q, i: LONG_COMPETING)
+    llm = multi_branch_llm()
+    result, state, _ = run_agent(retriever, llm, message="變更負責人", session=None)
+
+    assert result.decision == Decision.CLARIFY
+    assert state is not None
+    assert state.asked_branch_labels == [b["label"] for b in BRANCHES_5["branches"]]
+
+
+def test_renamed_dimension_does_not_cause_a_repeat_question():
+    """第二輪 LLM 把維度改了名，但分支相同 -> 不再問，改為分情境全列。"""
+    retriever = FakeRetriever(lambda q, i: LONG_COMPETING)
+    llm = multi_branch_llm(
+        branches={**BRANCHES_5, "dimension": "申請類型"},
+        standalone="還是不確定的銷戶問題",
+    )
+    session = SessionState(
+        original_query="銷戶要怎麼辦理？",
+        clarification_question="請問您要辦理的屬於哪一種？",
+        asked_dimensions=["銷戶申請方式"],
+        asked_branch_labels=[b["label"] for b in BRANCHES_5["branches"]],
+        clarification_count=1,
+        status="awaiting_clarification",
+    )
+    result, state, _ = run_agent(retriever, llm, message="都不是", session=session)
+
+    assert result.decision == Decision.ANSWER_ALL_BRANCHES
+    assert state is None

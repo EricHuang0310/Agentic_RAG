@@ -125,3 +125,55 @@ def test_healthz_exposes_thresholds_and_budget():
     assert body["status"] == "ok"
     assert "answerable" in body["thresholds"]
     assert "max_iterations" in body["budget"]
+
+
+def test_lost_session_is_visible_in_trace_and_does_not_repeat_the_question():
+    """前端沒帶回 session_id 時，不該再問一次一模一樣的問題。"""
+    long_competing = [item(f"銷戶{i}.pdf", 1.3 - i * 0.01, "內容" * 400) for i in range(5)]
+    llm = FakeLLM({
+        "grade": {"verdict": "multi_branch", "relevant_chunks": ["C1", "C2", "C3"]},
+        "analyze": {"is_compound": False, "rewritten_query": "", "keyword_query": "", "hyde_passage": ""},
+        "branches": {
+            "dimension": "銷戶申請方式",
+            "branches": [
+                {"label": "獨資戶變更負責人", "key_terms": ["獨資戶"], "chunks": ["C1"]},
+                {"label": "公司變更負責人", "key_terms": ["公司"], "chunks": ["C2"]},
+                {"label": "一般銷戶申請", "key_terms": ["銷戶"], "chunks": ["C3"]},
+                {"label": "其他情形一", "key_terms": [], "chunks": ["C4"]},
+                {"label": "其他情形二", "key_terms": [], "chunks": ["C5"]},
+            ],
+        },
+        "answer": "一、應備文件…[文獻 1]",
+    })
+    client = make_client(FakeRetriever(lambda q, i: long_competing), llm)
+    try:
+        first = client.post("/api/v1/chat", json={"message": "銷戶要怎麼辦理？"}).json()
+        assert first["decision"] == "clarify"
+
+        option_value = first["clarification_options"][0]["value"]
+        # 故意不帶 session_id，模擬前端漏帶／TTL 過期／服務重啟
+        second = client.post("/api/v1/chat", json={"message": option_value}).json()
+    finally:
+        client.__exit__(None, None, None)
+
+    assert second["decision"] == "answer"
+    assert second["status"] == "completed"
+    lookup = next(s for s in second["trace"] if s["step"] == "session_lookup")
+    assert lookup["detail"]["session_found"] is False
+
+
+def test_session_lookup_step_reports_a_found_session():
+    client = make_client(
+        FakeRetriever(lambda q, i: STRONG_HIT),
+        FakeLLM({
+            "grade": {"verdict": "sufficient", "relevant_chunks": ["C1"]},
+            "answer": "一、…[文獻 1]",
+        }),
+    )
+    try:
+        body = client.post("/api/v1/chat", json={"message": "遺留物現金怎麼處理？"}).json()
+    finally:
+        client.__exit__(None, None, None)
+    lookup = next(s for s in body["trace"] if s["step"] == "session_lookup")
+    assert lookup["detail"]["session_id_provided"] is False
+    assert lookup["detail"]["session_found"] is False

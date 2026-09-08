@@ -26,6 +26,9 @@ class SessionState:
     clarification_question: str = ""
     # 已經問過的區辨維度，避免換句話問同一件事
     asked_dimensions: List[str] = field(default_factory=list)
+    # 已經問過的分支標籤。維度名稱是 LLM 生成的、兩輪之間可能不一致，
+    # 但分支標籤來自同一批文件通常穩定，所以用它當作更可靠的重複判斷依據
+    asked_branch_labels: List[str] = field(default_factory=list)
     clarification_count: int = 0
     status: str = "active"
     updated_at: float = field(default_factory=time.time)

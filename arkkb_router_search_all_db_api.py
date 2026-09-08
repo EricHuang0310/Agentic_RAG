@@ -84,6 +84,19 @@ async def chat_api(request: ChatRequest) -> ChatResponse:
 
     session = await sessions.get(session_id)
     tracer = Tracer(session_id)
+    # session 遺失是「重複反問」最常見的原因（前端沒帶回 session_id、TTL 過期、
+    # 服務重啟或多 worker），但它是靜默的。明確記一筆，讓 trace 看得出來。
+    tracer.add(
+        "session_lookup",
+        session_id_provided=request.session_id is not None,
+        session_found=session is not None,
+        awaiting_clarification=bool(session and session.awaiting_clarification),
+    )
+    if request.session_id is not None and session is None:
+        logger.warning(
+            "帶了 session_id 但查無 session（可能是 TTL 過期、服務重啟或多 worker）: %s",
+            session_id,
+        )
 
     result, new_state = await agent.run(message, session, tracer)
 
