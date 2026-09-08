@@ -52,9 +52,9 @@ def test_negative_scores_do_not_break_weights():
 
 def test_counts_use_thresholds():
     chunks = parse_chunks([
-        item("A.pdf", 2.0, "甲"),   # >= answerable(1.0)
-        item("A.pdf", 0.5, "乙"),   # >= supportive(0.0)
-        item("B.pdf", -2.0, "丙"),  # 兩者皆否
+        item("A.pdf", 0.90, "甲"),  # >= answerable(0.7)
+        item("A.pdf", 0.50, "乙"),  # >= supportive(0.35)
+        item("B.pdf", 0.10, "丙"),  # 兩者皆否
     ])
     signals = compute_signals(chunks)
     assert signals.n_answerable == 1

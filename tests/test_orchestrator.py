@@ -24,16 +24,19 @@ def run_agent(retriever, llm, message="遺留物現金怎麼處理？", session=
     return result, state, tracer
 
 
-STRONG_HIT = [item("遺留物處理.pdf", 3.2, "遺留物現金應於當日…" * 5)]
+# 分數採 0～1 正規化尺度，與實際 reranker 一致
+# （SCORE_ANSWERABLE=0.7、SCORE_SUPPORTIVE=0.35、GAP_AMBIGUOUS=0.08）
+STRONG_HIT = [item("遺留物處理.pdf", 0.92, "遺留物現金應於當日…" * 5)]
 WEAK_SPREAD = [
-    item("久未往來.pdf", -3.0, "久未往來帳戶…"),
-    item("開戶作業.pdf", -3.4, "開戶應…"),
-    item("綜合對帳單.pdf", -3.8, "對帳單…"),
+    item("久未往來.pdf", 0.08, "久未往來帳戶…"),
+    item("開戶作業.pdf", 0.06, "開戶應…"),
+    item("綜合對帳單.pdf", 0.04, "對帳單…"),
 ]
+# 三個來源分數接近（gap=0.03 < 0.08）-> 互相競爭
 COMPETING = [
-    item("久未往來.pdf", 1.30, "久未往來帳戶的處理…" * 3),
-    item("開戶作業.pdf", 1.25, "開戶時的處理…" * 3),
-    item("綜合對帳單.pdf", 1.20, "對帳單的處理…" * 3),
+    item("久未往來.pdf", 0.74, "久未往來帳戶的處理…" * 3),
+    item("開戶作業.pdf", 0.71, "開戶時的處理…" * 3),
+    item("綜合對帳單.pdf", 0.69, "對帳單的處理…" * 3),
 ]
 
 
@@ -147,7 +150,7 @@ def test_few_short_branches_are_answered_inline():
 # ==================== (c-2) 分支多：反問，帶結構化選項 ====================
 def test_many_branches_trigger_clarification_with_options():
     many = [
-        item(f"業務{i}.pdf", 1.3 - i * 0.01, "內容" * 400) for i in range(5)
+        item(f"業務{i}.pdf", 0.74 - i * 0.01, "內容" * 400) for i in range(5)
     ]
     retriever = FakeRetriever(lambda q, i: many)
     llm = FakeLLM({
@@ -242,7 +245,7 @@ def test_followup_falls_back_to_concatenation_when_rewrite_fails():
 
 # ==================== 反問次數上限 ====================
 def test_second_round_does_not_ask_the_same_dimension_again():
-    many = [item(f"業務{i}.pdf", 1.3 - i * 0.01, "內容" * 400) for i in range(5)]
+    many = [item(f"業務{i}.pdf", 0.74 - i * 0.01, "內容" * 400) for i in range(5)]
     retriever = FakeRetriever(lambda q, i: many)
     llm = FakeLLM({
         "standalone": "補充後的獨立問句",
@@ -357,7 +360,7 @@ BRANCHES_5 = {
     ],
 }
 LONG_COMPETING = [
-    item(f"銷戶{i}.pdf", 1.3 - i * 0.01, "內容" * 400) for i in range(5)
+    item(f"銷戶{i}.pdf", 0.74 - i * 0.01, "內容" * 400) for i in range(5)
 ]
 
 
@@ -485,7 +488,7 @@ def test_score_veto_actually_triggers_a_rewrite(monkeypatch):
     def responder(query, index):
         # 原問法只拿到 0.5073（未達 SCORE_ANSWERABLE=1.0），改寫後才拿到強命中
         if "正式術語" in query or "假想" in query or "關鍵詞" in query:
-            return [item("遺留物處理.pdf", 2.4, "遺留物現金應於當日清點…")]
+            return [item("遺留物處理.pdf", 0.86, "遺留物現金應於當日清點…")]
         return [item("遺留物處理.pdf", 0.5073, "相關但分數偏低的段落")]
 
     retriever = FakeRetriever(responder)

@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 import arkkb_router_search_all_db_api as api
 from agentic.orchestrator import Agent
 
-STRONG_HIT = [item("遺留物處理.pdf", 3.2, "遺留物現金應於當日清點…")]
-MANY_BRANCHES = [item(f"業務{i}.pdf", 1.3 - i * 0.01, "內容" * 400) for i in range(5)]
+STRONG_HIT = [item("遺留物處理.pdf", 0.92, "遺留物現金應於當日清點…")]
+MANY_BRANCHES = [item(f"業務{i}.pdf", 0.74 - i * 0.01, "內容" * 400) for i in range(5)]
 
 
 def make_client(retriever, llm):
@@ -41,7 +41,7 @@ def test_answer_response_keeps_legacy_fields():
     assert body["decision"] == "answer"
     assert body["diagnosis"] == "sufficient"
     assert body["reference_chunks"][0]["filename"] == "遺留物處理.pdf"
-    assert body["top_score"] == pytest.approx(3.2)
+    assert body["top_score"] == pytest.approx(0.92)
     assert body["trace"]
 
 
@@ -129,7 +129,7 @@ def test_healthz_exposes_thresholds_and_budget():
 
 def test_lost_session_is_visible_in_trace_and_does_not_repeat_the_question():
     """前端沒帶回 session_id 時，不該再問一次一模一樣的問題。"""
-    long_competing = [item(f"銷戶{i}.pdf", 1.3 - i * 0.01, "內容" * 400) for i in range(5)]
+    long_competing = [item(f"銷戶{i}.pdf", 0.74 - i * 0.01, "內容" * 400) for i in range(5)]
     llm = FakeLLM({
         "grade": {"verdict": "multi_branch", "relevant_chunks": ["C1", "C2", "C3"]},
         "analyze": {"is_compound": False, "rewritten_query": "", "keyword_query": "", "hyde_passage": ""},
@@ -177,3 +177,18 @@ def test_session_lookup_step_reports_a_found_session():
     lookup = next(s for s in body["trace"] if s["step"] == "session_lookup")
     assert lookup["detail"]["session_id_provided"] is False
     assert lookup["detail"]["session_found"] is False
+
+
+def test_healthz_reports_disabled_floor_as_null():
+    """停用的門檻是 -inf，不能直接塞進 JSON。"""
+    client = make_client(FakeRetriever(lambda q, i: STRONG_HIT), FakeLLM({}))
+    try:
+        response = client.get("/healthz")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert response.status_code == 200
+    thresholds = response.json()["thresholds"]
+    assert thresholds["floor"] is None
+    assert thresholds["answerable"] == 0.7
+    assert thresholds["calibrated"] is True

@@ -138,20 +138,28 @@ query 分析要等到第一輪判定不足才會做。最壞情況由預算上�
 預算耗盡時的行為是明確的：**絕不硬答**。訊號顯示有競爭證據就反問，
 證據普遍不足就拒答。
 
-## 閾值需要校準
+## 閾值
 
-`SCORE_ANSWERABLE` / `SCORE_SUPPORTIVE` / `SCORE_FLOOR` / `GAP_AMBIGUOUS`
-這些絕對門檻只對「同一個 reranker + 同一批語料」有意義。
+預設值假設 reranker 輸出 **0～1 的正規化分數**：
 
-**預設是「未校準模式」**（`ARKKB_THRESHOLDS_CALIBRATED=0`）：此時不允許單憑
-絕對分數判定拒答——停用 `SCORE_FLOOR` 的硬否決，grader 說證據足夠時直接採信
-（標記 `low_confidence`）。因為未校準的門檻只是猜測，猜錯的代價是把答得出來的
-問題判成拒答。這個模式下把關由 LLM grader 負責，它至少讀得懂內容。
+| 設定 | 預設 | 依據 | 作用 |
+|---|---|---|---|
+| `ARKKB_SCORE_ANSWERABLE` | `0.7` | **實測** | 達到就直接採信 grader 的「證據足夠」 |
+| `ARKKB_SCORE_SUPPORTIVE` | `0.35` | 依尺度推導 | 算得上有證據的下限；改寫後仍低分時的可答下限 |
+| `ARKKB_GAP_AMBIGUOUS` | `0.08` | 依尺度推導 | top1−top2 小於此值視為候選互相競爭 |
+| `ARKKB_SCORE_FLOOR` | 停用 | — | 唯一「不管 grader 說什麼都拒答」的門檻 |
+| `ARKKB_THRESHOLDS_CALIBRATED` | `1` | — | 關掉則完全不看絕對分數，把關全交給 grader |
 
-校準完成後設定 `ARKKB_THRESHOLDS_CALIBRATED=1`，才會啟用「訊號否決 grader」
-的完整機制。
+`0.7` 在新架構裡的意義和舊版**不同**：舊版是「低於 0.7 就反問」，這裡是
+「低於 0.7 就先去找更強的證據」，之後才可能反問。所以反問率會比舊版低——
+一部分低分問題會在改寫後直接答出來，這正是改架構的目的。
 
-建議流程：
+`SCORE_FLOOR` 預設停用，因為它設錯就會把答得出來的問題判成沒有資料。
+等手上有「應拒答」的標註資料、確認那些問題的 top1 落在哪個上緣之後再打開
+（`ARKKB_SCORE_FLOOR=0.12`，要關掉設 `off`）。停用期間拒答一律需要 grader
+判定，`GET /healthz` 的 `thresholds.floor` 會是 `null`。
+
+換 reranker 或換知識庫後這些值全部要重測。建議流程：
 
 1. 收 50～100 題真實問題，標註「應回答 / 應反問 / 應拒答」
 2. 跑 `python scripts/probe_scores.py --file questions.txt`（每行 `問題<TAB>標註`）
@@ -172,7 +180,8 @@ query 分析要等到第一輪判定不足才會做。最壞情況由預算上�
 | `reason` | 意思 | 怎麼處理 |
 |---|---|---|
 | `檢索結果為空` | 知識庫回了 200 但 `data` 是空陣列 | 檢查 `kb_list` 名稱、`top_k`；用 `scripts/probe_scores.py` 直接打同一個 query 確認 |
-| `top1=… 低於地板 …` | 絕對門檻否決 | **門檻沒校準**，見下方 |
+| `top1=… 低於地板 …` | 絕對門檻否決 | 只有設了 `ARKKB_SCORE_FLOOR` 才會出現；值設太高 |
+| `grader 說足夠但 top1=… 未達門檻` | 分數低於 `SCORE_ANSWERABLE` | 正常行為，會接著改寫重試；若沒看到 `analyze_query` 才是問題 |
 | `grader 判定語料庫未涵蓋此主題` | LLM grader 說沒有 | 看 `grade` 那一步的 `reasoning`；若判斷有誤是 grader prompt 的問題 |
 | `grader 失效；分數不足以支撐作答` | grader 輸出無法解析，退回純訊號 | 看 `grade` 的 `parse_ok`；門檻沒校準時分數判斷不可信 |
 

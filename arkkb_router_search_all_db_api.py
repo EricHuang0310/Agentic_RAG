@@ -23,6 +23,7 @@ clarification_options / signals / trace 等）都是附加的，舊前端可以�
 """
 
 import logging
+import math
 import uuid
 from contextlib import asynccontextmanager
 
@@ -64,6 +65,11 @@ async def lifespan(app: FastAPI):
                 "分數門檻尚未校準（ARKKB_THRESHOLDS_CALIBRATED=0）："
                 "不會單憑絕對分數判定拒答，把關全部交給 LLM grader。"
                 "請先跑 scripts/probe_scores.py 確認分數尺度後再打開。"
+            )
+        elif math.isinf(config.SCORE_FLOOR):
+            logger.info(
+                "SCORE_FLOOR 停用中：拒答一律需要 grader 判定，"
+                "不會單憑分數過低就拒答。取得「應拒答」標註資料後可設定 ARKKB_SCORE_FLOOR。"
             )
         yield
 
@@ -142,6 +148,11 @@ async def chat_api(request: ChatRequest) -> ChatResponse:
     )
 
 
+def _threshold(value: float):
+    """停用的門檻（-inf）在 JSON 裡以 null 表示。"""
+    return None if math.isinf(value) else value
+
+
 @app.get("/healthz")
 async def healthz() -> dict:
     return {
@@ -151,9 +162,10 @@ async def healthz() -> dict:
         "active_sessions": await app.state.sessions.size(),
         "thresholds": {
             "calibrated": config.THRESHOLDS_CALIBRATED,
-            "answerable": config.SCORE_ANSWERABLE,
-            "supportive": config.SCORE_SUPPORTIVE,
-            "floor": config.SCORE_FLOOR,
+            "answerable": _threshold(config.SCORE_ANSWERABLE),
+            "supportive": _threshold(config.SCORE_SUPPORTIVE),
+            # 停用的門檻是 -inf，JSON 無法表示，回傳 null
+            "floor": _threshold(config.SCORE_FLOOR),
             "gap_ambiguous": config.GAP_AMBIGUOUS,
         },
         "budget": {

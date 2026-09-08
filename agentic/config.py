@@ -22,6 +22,16 @@ def _i(name: str, default: int) -> int:
     return int(os.getenv(name, default))
 
 
+def _score(name: str, default) -> float:
+    """分數門檻。值為 off / none / disabled 時代表停用該門檻（等同負無限大）。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    if raw.strip().lower() in ("off", "none", "disabled", ""):
+        return float("-inf")
+    return float(raw)
+
+
 # ==================== 外部服務 ====================
 RETRIEVE_URL = os.getenv(
     "ARKKB_RETRIEVE_URL",
@@ -49,28 +59,36 @@ TOP_N = _i("ARKKB_TOP_N", 6)
 TOP_K = _i("ARKKB_TOP_K", 66)
 
 # ==================== 分數閾值（需校準）====================
+# 以下門檻假設 reranker 輸出的是 0～1 的正規化分數。
+#
+# SCORE_ANSWERABLE = 0.7 來自實測：在舊版單一門檻的架構下，0.7 是反問效果
+# 最好的切點。注意它在新架構裡的意義不同——舊版是「低於 0.7 就反問」，
+# 這裡是「低於 0.7 就不直接採信 grader，先去找更強的證據」，之後才可能反問。
+# 所以實際的反問率會比舊版低，因為有一部分低分問題會在改寫後就答出來。
+#
 # 這些絕對門檻是否已針對「目前這個 reranker + 目前這批語料」校準過。
-#
-# 預設 False，代表尚未校準。此時**不允許單憑絕對分數判定拒答**：
-#   - 停用 SCORE_FLOOR 的硬否決
-#   - grader 說證據足夠時直接採信，不再要求 top1 >= SCORE_ANSWERABLE
-# 因為未校準的絕對門檻只是猜測，猜錯的代價是把答得出來的問題判成拒答。
-# 未校準時的把關改由 LLM grader 負責（它至少讀得懂內容）。
-#
-# 跑過 scripts/probe_scores.py 確認分數尺度、把下面幾個門檻調成實際數值後，
-# 再設 ARKKB_THRESHOLDS_CALIBRATED=1 打開完整的訊號否決機制。
-THRESHOLDS_CALIBRATED = os.getenv("ARKKB_THRESHOLDS_CALIBRATED", "0") in ("1", "true", "True")
+# 為 False 時不允許單憑絕對分數判定拒答（停用 SCORE_FLOOR，且 grader 說
+# 證據足夠時直接採信），把關全部交給 LLM grader。
+THRESHOLDS_CALIBRATED = os.getenv("ARKKB_THRESHOLDS_CALIBRATED", "1") in ("1", "true", "True")
 
-# top1 >= SCORE_ANSWERABLE 且 grader 認為足夠 -> 直接回答
-SCORE_ANSWERABLE = _f("ARKKB_SCORE_ANSWERABLE", 1.0)
-# top1 < SCORE_FLOOR -> 語料庫幾乎確定沒有這個主題，反問也沒用
-SCORE_FLOOR = _f("ARKKB_SCORE_FLOOR", -1.0)
-# top1 - top2 小於此值代表候選互相競爭（歧異訊號之一）
-GAP_AMBIGUOUS = _f("ARKKB_GAP_AMBIGUOUS", 0.5)
+# top1 >= SCORE_ANSWERABLE 且 grader 認為足夠 -> 直接回答（實測值）
+SCORE_ANSWERABLE = _score("ARKKB_SCORE_ANSWERABLE", 0.7)
+# 具備一定證據強度的下限（比 SCORE_ANSWERABLE 寬鬆）。
+# 用於 n_supportive、多分支證據判定，以及改寫後仍低分時的可答下限。
+SCORE_SUPPORTIVE = _score("ARKKB_SCORE_SUPPORTIVE", 0.35)
+# top1 < SCORE_FLOOR -> 語料庫幾乎確定沒有這個主題，反問也沒用。
+#
+# 預設停用（-inf）。這是唯一一個「不管 grader 說什麼都直接拒答」的門檻，
+# 設錯的代價是把答得出來的問題判成沒有資料，所以要等手上有「應拒答」的
+# 標註資料、確認那些問題的 top1 落在哪裡之後再打開。
+# 設定方式：ARKKB_SCORE_FLOOR=0.12；要關掉則設為 off。
+SCORE_FLOOR = _score("ARKKB_SCORE_FLOOR", float("-inf"))
+# top1 - top2 小於此值代表候選互相競爭（歧異訊號之一）。
+# 0～1 尺度下差距本來就小，這個值必須跟著縮小，否則幾乎所有結果都會被
+# 判定成「互相競爭」。
+GAP_AMBIGUOUS = _f("ARKKB_GAP_AMBIGUOUS", 0.08)
 # 判定「多分支互斥」時，至少要有幾個 chunk 具備一定證據強度
 MULTI_BRANCH_MIN_STRONG = _i("ARKKB_MULTI_BRANCH_MIN_STRONG", 2)
-# 具備一定證據強度的下限（比 SCORE_ANSWERABLE 寬鬆）
-SCORE_SUPPORTIVE = _f("ARKKB_SCORE_SUPPORTIVE", 0.0)
 
 # ==================== 分支處理策略 ====================
 # 分支數 <= 此值且內容夠短 -> 分情境全部列出，不反問
