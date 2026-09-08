@@ -176,6 +176,11 @@ query 分析要等到第一輪判定不足才會做。最壞情況由預算上�
 | `grader 判定語料庫未涵蓋此主題` | LLM grader 說沒有 | 看 `grade` 那一步的 `reasoning`；若判斷有誤是 grader prompt 的問題 |
 | `grader 失效；分數不足以支撐作答` | grader 輸出無法解析，退回純訊號 | 看 `grade` 的 `parse_ok`；門檻沒校準時分數判斷不可信 |
 
+`trace` 裡的 `analyze_query` 有一個 `trigger` 欄位，說明這次分析是為什麼做的
+（`grade_insufficient` = grader 判定不足；`retry_needs_variants` = 診斷判定要改寫
+但先前略過了分析）。若診斷是 `lexical_mismatch` 卻完全沒有 `analyze_query`
+這一步，代表改寫根本沒發生。
+
 另外看 `signals` 那一步的 `top1`：**如果它是負數或遠小於 1，就代表預設門檻
 和你的 reranker 尺度對不上**。拒答時 `reference_chunks` 仍會回傳，裡面的
 `score` 也可以直接看出尺度。

@@ -9,6 +9,7 @@ import asyncio
 
 from conftest import FakeLLM, FakeRetriever, item
 
+from agentic import config
 from agentic.budget import Budget
 from agentic.orchestrator import Agent
 from agentic.schemas import Decision, Diagnosis
@@ -469,3 +470,57 @@ def test_analyzer_failure_with_competing_evidence_goes_to_branch_handling():
 
     assert result.decision == Decision.ANSWER_ALL_BRANCHES
     assert result.diagnosis == Diagnosis.MULTI_BRANCH
+
+
+# ==================== 診斷說要改寫，就必須真的改寫 ====================
+def test_score_veto_actually_triggers_a_rewrite(monkeypatch):
+    """grader 說足夠、但分數未達門檻被否決時，必須真的改寫重試。
+
+    回歸測試：原本 query 分析的觸發條件綁在「grader 說不足」上，
+    而這條路徑的 grader 說的是「足夠」，導致分析被略過、沒有變體可用，
+    於是 diagnose 的 reason 寫著「先改寫找更強證據」卻什麼都沒做就收斂。
+    """
+    monkeypatch.setattr(config, "THRESHOLDS_CALIBRATED", True)
+
+    def responder(query, index):
+        # 原問法只拿到 0.5073（未達 SCORE_ANSWERABLE=1.0），改寫後才拿到強命中
+        if "正式術語" in query or "假想" in query or "關鍵詞" in query:
+            return [item("遺留物處理.pdf", 2.4, "遺留物現金應於當日清點…")]
+        return [item("遺留物處理.pdf", 0.5073, "相關但分數偏低的段落")]
+
+    retriever = FakeRetriever(responder)
+    llm = FakeLLM({
+        "grade": {"verdict": "sufficient", "relevant_chunks": ["C1"]},
+        "analyze": {
+            "is_compound": False,
+            "sub_questions": [],
+            "rewritten_query": "遺留物品現金之處理正式術語",
+            "keyword_query": "遺留物品 現金 關鍵詞",
+            "hyde_passage": "假想條文：遺留物品之現金應…",
+        },
+        "answer": "一、清點現金…[文獻 1]",
+    })
+    result, _, tracer = run_agent(retriever, llm)
+
+    assert result.decision == Decision.ANSWER
+    # 確實跑了第二輪，而且用的是改寫後的問法
+    assert len(retriever.queries) > 1
+    assert any("正式術語" in q for q in retriever.queries)
+    # 分析是在重試前補做的
+    analyze_steps = [s for s in tracer.steps if s.step == "analyze_query"]
+    assert analyze_steps
+    assert analyze_steps[0].detail["trigger"] == "retry_needs_variants"
+
+
+def test_happy_path_still_skips_query_analysis(monkeypatch):
+    """證據充足時不該多花一次 LLM 呼叫做分析。"""
+    monkeypatch.setattr(config, "THRESHOLDS_CALIBRATED", True)
+    retriever = FakeRetriever(lambda q, i: STRONG_HIT)
+    llm = FakeLLM({
+        "grade": {"verdict": "sufficient", "relevant_chunks": ["C1"]},
+        "answer": "一、…[文獻 1]",
+    })
+    result, _, _ = run_agent(retriever, llm)
+
+    assert result.decision == Decision.ANSWER
+    assert llm.calls == ["grade", "answer"]

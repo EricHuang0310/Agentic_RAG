@@ -144,25 +144,10 @@ class Agent:
                     grade = GradeResult(verdict=Diagnosis.UNKNOWN, parse_ok=False)
                 extra.update(grade.model_dump(exclude={"relevant_chunk_ids"}))
 
-            # 第一輪判定不足時才做 query 分析，讓 happy path 只花 1 次檢索 + 1 次 grading
-            if (
-                analysis is None
-                and grade.verdict != Diagnosis.SUFFICIENT
-                and budget.can_afford_llm()
-            ):
-                with tracer.timed("analyze_query") as extra:
-                    try:
-                        analysis = await analyze_query(query, self.llm, budget)
-                    except BudgetExhausted:
-                        analysis = None
-                    if analysis:
-                        extra.update(
-                            is_compound=analysis.is_compound,
-                            sub_questions=analysis.sub_questions,
-                            rewritten=analysis.rewritten_query,
-                            keyword=analysis.keyword_query,
-                            parse_ok=analysis.parse_ok,
-                        )
+            # 第一輪判定不足時才做 query 分析，讓 happy path 只花 1 次檢索 + 1 次 grading。
+            # grader 說證據足夠時先略過；若稍後診斷仍判定要改寫，會在重試前補做。
+            if analysis is None and grade.verdict != Diagnosis.SUFFICIENT:
+                analysis = await self._analyze(query, budget, tracer, trigger="grade_insufficient")
 
             # ---------- diagnose ----------
             outcome = diagnose(
@@ -184,6 +169,14 @@ class Agent:
                 continue
 
             if outcome.diagnosis == Diagnosis.LEXICAL_MISMATCH and not retried_variants:
+                # grader 說證據足夠、但分數未達門檻而被否決時，前面那一步會略過
+                # query 分析，導致這裡沒有變體可用。診斷既然說要改寫就得真的改寫，
+                # 否則會出現「reason 寫著先改寫找更強證據，卻什麼都沒做就收斂」。
+                if analysis is None:
+                    analysis = await self._analyze(
+                        query, budget, tracer, trigger="retry_needs_variants"
+                    )
+
                 if analysis is not None and analysis.has_new_variants(query):
                     plan = RetrievalPlan.VARIANTS
                     retried_variants = True
@@ -230,6 +223,38 @@ class Agent:
             )
 
         return self._refuse(query, chunks, signals, budget, round_label, outcome.reason), None
+
+    async def _analyze(
+        self,
+        query: str,
+        budget: Budget,
+        tracer: Tracer,
+        trigger: str,
+    ) -> Optional[QueryAnalysis]:
+        """做一次 query 分析（術語改寫、關鍵詞、HyDE、複合問題拆解）。
+
+        trigger 會記進 trace，用來區分是「grader 判定不足」時做的，
+        還是「診斷判定要改寫但還沒分析過」時補做的。
+        """
+        if not budget.can_afford_llm():
+            tracer.add("analyze_query", trigger=trigger, skipped="LLM 預算不足")
+            return None
+
+        with tracer.timed("analyze_query", trigger=trigger) as extra:
+            try:
+                analysis = await analyze_query(query, self.llm, budget)
+            except BudgetExhausted:
+                analysis = None
+            if analysis:
+                extra.update(
+                    is_compound=analysis.is_compound,
+                    sub_questions=analysis.sub_questions,
+                    rewritten=analysis.rewritten_query,
+                    keyword=analysis.keyword_query,
+                    parse_ok=analysis.parse_ok,
+                    has_new_variants=analysis.has_new_variants(query),
+                )
+        return analysis
 
     # ==================== Step 0 ====================
     async def _normalize_query(
